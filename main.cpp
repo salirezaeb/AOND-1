@@ -1,4 +1,6 @@
+
 #include <bits/stdc++.h>
+#include <unistd.h>
 using namespace std;
 
 struct Node {
@@ -33,12 +35,12 @@ struct RunningStats {
 class MultiBitTrie {
 public:
     explicit MultiBitTrie(uint8_t s) : stride(s) {
-        if (!(stride==1 || stride==2 || stride==4 || stride==8)) throw runtime_error("stride");
+        if (!(stride==1 || stride==2 || stride==4 || stride==8)) throw runtime_error("invalid stride");
         nodes.emplace_back();
     }
 
     void insert(uint32_t prefix, uint8_t length, uint32_t nextHop) {
-        if (length > 32) throw runtime_error("length");
+        if (length > 32) throw runtime_error("invalid length");
         if (length == 0) {
             nodes[0].hasHop = true;
             nodes[0].hop = nextHop;
@@ -81,7 +83,8 @@ public:
             if (it == nodes[cur].child.end()) break;
             cur = it->second;
             if (nodes[cur].hasHop) {
-                if (!best.has_value() || nodes[cur].plen > best->first) best = {nodes[cur].plen, nodes[cur].hop};
+                if (!best.has_value() || nodes[cur].plen > best->first)
+                    best = {nodes[cur].plen, nodes[cur].hop};
             }
             pos += stride;
         }
@@ -104,6 +107,14 @@ public:
         return nodes.size() * approxNode + e * approxEdge;
     }
 
+    void tprint(ostream& os = cerr) const {
+        os << "(root)";
+        if (nodes[0].hasHop) os << " [len=" << (int)nodes[0].plen << ", nh=" << nodes[0].hop << "]";
+        os << "\n";
+        tprint_dfs(os, 0, 0);
+        os.flush();
+    }
+
 private:
     vector<Node> nodes;
     uint8_t stride;
@@ -111,6 +122,34 @@ private:
     uint16_t chunk(uint32_t ip, uint8_t posFromMSB) const {
         uint32_t shift = 32u - (uint32_t)posFromMSB - (uint32_t)stride;
         return (uint16_t)((ip >> shift) & ((1u << stride) - 1u));
+    }
+
+    string chunk_to_bin(uint16_t v) const {
+        string s(stride, '0');
+        for (int i = (int)stride - 1; i >= 0; --i) {
+            s[i] = (v & 1) ? '1' : '0';
+            v >>= 1;
+        }
+        return s;
+    }
+
+    void tprint_dfs(ostream& os, int nodeIdx, int depth) const {
+        vector<pair<uint16_t,int>> kids;
+        kids.reserve(nodes[nodeIdx].child.size());
+        for (auto &kv : nodes[nodeIdx].child) kids.push_back(kv);
+        sort(kids.begin(), kids.end(), [](auto &a, auto &b){ return a.first < b.first; });
+
+        for (auto &kv : kids) {
+            uint16_t lab = kv.first;
+            int childIdx = kv.second;
+            for (int i = 0; i < depth + 1; ++i) os << "  ";
+            os << chunk_to_bin(lab) << " (" << lab << ")";
+            if (nodes[childIdx].hasHop) {
+                os << " [len=" << (int)nodes[childIdx].plen << ", nh=" << nodes[childIdx].hop << "]";
+            }
+            os << "\n";
+            tprint_dfs(os, childIdx, depth + 1);
+        }
     }
 };
 
@@ -126,30 +165,22 @@ static uint32_t parse_hex_u32(const string& s) {
     return (uint32_t)stoul(s, nullptr, 16);
 }
 
-struct PrefixLoadResult {
-    size_t ok = 0;
-    size_t skipped = 0;
-};
+struct PrefixLoadResult { size_t ok = 0; size_t skipped = 0; };
 
 static PrefixLoadResult load_prefix_file_hex3(const string& path, MultiBitTrie &trie) {
     ifstream in(path);
     if (!in) throw runtime_error("open_prefix");
     PrefixLoadResult res;
     string line;
-
     while (getline(in, line)) {
         auto h = line.find('#');
         if (h != string::npos) line = line.substr(0, h);
         line = trim_copy(line);
         if (line.empty()) continue;
 
-        string a;
-        int len, hop;
-        {
-            stringstream ss(line);
-            if (!(ss >> a >> len >> hop)) { res.skipped++; continue; }
-        }
-
+        string a; int len; long long hop;
+        stringstream ss(line);
+        if (!(ss >> a >> len >> hop)) { res.skipped++; continue; }
         if (len < 0 || len > 32) { res.skipped++; continue; }
 
         uint32_t prefix = parse_hex_u32(a);
@@ -189,10 +220,7 @@ static string csv_escape(const string& s) {
     return t;
 }
 
-static int run_cmd(const string& cmd) {
-    int rc = system(cmd.c_str());
-    return rc;
-}
+static int run_cmd(const string& cmd) { return system(cmd.c_str()); }
 
 static void generate_plots_with_gnuplot() {
     {
@@ -210,7 +238,6 @@ static void generate_plots_with_gnuplot() {
         "set boxwidth 0.7\n"
         "plot 'summary.csv' using 1:9 every ::1 title 'Avg(ns)' with boxes\n";
     }
-
     {
         ofstream gp("plot_memory.gnuplot");
         gp <<
@@ -226,40 +253,101 @@ static void generate_plots_with_gnuplot() {
         "set boxwidth 0.7\n"
         "plot 'summary.csv' using 1:11 every ::1 title 'Mem(bytes)' with boxes\n";
     }
-
     run_cmd("gnuplot plot_time.gnuplot");
     run_cmd("gnuplot plot_memory.gnuplot");
 }
 
-int main(int argc, char** argv) {
-    ios::sync_with_stdio(false);
-    cin.tie(nullptr);
+static void interactive_mode() {
+    cerr << "=== Interactive Mode ===\n" << flush;
+    cerr << "Stride? (1/2/4/8): " << flush;
 
-    if (argc < 3) {
-        cerr << "Usage: " << argv[0] << " <prefix-file> <addresses-file>\n";
-        return 1;
+    int s;
+    if (!(cin >> s)) {
+        cerr << "\nInput error (cin failed).\n";
+        return;
+    }
+    if (!(s==1 || s==2 || s==4 || s==8)) {
+        cerr << "Invalid stride.\n";
+        return;
     }
 
-    string prefixFile = argv[1];
-    string addrFile = argv[2];
+    MultiBitTrie trie((uint8_t)s);
 
-    vector<string> addrHex;
-    try {
-        addrHex = load_addresses_hex_strings(addrFile);
-    } catch (...) {
-        cerr << "Error reading addresses file\n";
-        return 2;
+    while (true) {
+        cerr << "\n--- Menu ---\n"
+             << "1) Load prefixes from file\n"
+             << "2) Insert prefix (hexPrefix length nextHop)\n"
+             << "3) Lookup address (hexAddress)\n"
+             << "4) tprint\n"
+             << "5) Memory estimate\n"
+             << "0) Exit\n"
+             << "> " << flush;
+
+        int cmd;
+        if (!(cin >> cmd)) {
+            cerr << "\nEOF/invalid input. Exiting.\n";
+            return;
+        }
+        if (cmd == 0) return;
+
+        if (cmd == 1) {
+            string path;
+            cerr << "prefix-file path: " << flush;
+            cin >> path;
+            try {
+                auto lr = load_prefix_file_hex3(path, trie);
+                cerr << "Loaded: " << lr.ok << " (skipped: " << lr.skipped << ")\n";
+            } catch (const exception& e) {
+                cerr << "Error: " << e.what() << "\n";
+            }
+        } else if (cmd == 2) {
+            string hx; int len; long long hop;
+            cerr << "Enter: hexPrefix length nextHop : " << flush;
+            cin >> hx >> len >> hop;
+            try {
+                trie.insert(parse_hex_u32(hx), (uint8_t)len, (uint32_t)hop);
+                cerr << "OK\n";
+            } catch (const exception& e) {
+                cerr << "Insert failed: " << e.what() << "\n";
+            }
+        } else if (cmd == 3) {
+            string hx;
+            cerr << "hexAddress: " << flush;
+            cin >> hx;
+            try {
+                uint32_t ip = parse_hex_u32(hx);
+                auto t1 = chrono::high_resolution_clock::now();
+                auto nh = trie.lookup(ip);
+                auto t2 = chrono::high_resolution_clock::now();
+                long double ns = chrono::duration<long double, nano>(t2 - t1).count();
+                cerr << "Next hop: " << (nh ? to_string(*nh) : string("None"))
+                     << " | time(ns): " << (double)ns << "\n";
+            } catch (const exception& e) {
+                cerr << "Lookup failed: " << e.what() << "\n";
+            }
+        } else if (cmd == 4) {
+            trie.tprint(cerr);
+        } else if (cmd == 5) {
+            cerr << "node_count=" << trie.nodeCount()
+                 << " edge_count=" << trie.edgeCount()
+                 << " est_memory_bytes=" << trie.estimateMemoryBytes()
+                 << "\n";
+        } else {
+            cerr << "Unknown command.\n";
+        }
     }
+}
+
+static int batch_mode(const string& prefixFile, const string& addrFile) {
+    vector<string> addrHex = load_addresses_hex_strings(addrFile);
 
     ofstream outRes("lookup_results.csv");
     ofstream outSum("summary.csv");
-    if (!outRes || !outSum) {
-        cerr << "Error creating CSV files\n";
-        return 3;
-    }
+    if (!outRes || !outSum) throw runtime_error("cannot create csv");
 
     write_csv_header(outRes, {"stride","address_hex","next_hop","time_ns"});
-    write_csv_header(outSum, {"stride","prefix_count","node_count","edge_count","build_time_ms","lookup_count","min_ns","max_ns","avg_ns","std_ns","est_memory_bytes"});
+    write_csv_header(outSum, {"stride","prefix_count","node_count","edge_count","build_time_ms",
+                              "lookup_count","min_ns","max_ns","avg_ns","std_ns","est_memory_bytes"});
 
     vector<int> strides = {1,2,4,8};
 
@@ -267,25 +355,14 @@ int main(int argc, char** argv) {
         MultiBitTrie trie((uint8_t)s);
 
         auto b1 = chrono::high_resolution_clock::now();
-        PrefixLoadResult lr;
-        try {
-            lr = load_prefix_file_hex3(prefixFile, trie);
-        } catch (...) {
-            cerr << "Error reading prefix file\n";
-            return 4;
-        }
+        auto lr = load_prefix_file_hex3(prefixFile, trie);
         auto b2 = chrono::high_resolution_clock::now();
         long double build_ms = chrono::duration<long double, milli>(b2 - b1).count();
 
         RunningStats st;
 
         for (const string& hx : addrHex) {
-            uint32_t ip;
-            try {
-                ip = parse_hex_u32(hx);
-            } catch (...) {
-                continue;
-            }
+            uint32_t ip = parse_hex_u32(hx);
 
             auto t1 = chrono::high_resolution_clock::now();
             auto hop = trie.lookup(ip);
@@ -313,11 +390,24 @@ int main(int argc, char** argv) {
                << trie.estimateMemoryBytes() << "\n";
     }
 
-    outRes.flush();
-    outSum.flush();
     outRes.close();
     outSum.close();
-
     generate_plots_with_gnuplot();
     return 0;
+}
+
+int main(int argc, char** argv) {
+    // پیام شروع را روی stderr چاپ می‌کنیم تا همیشه دیده شود
+    cerr << "[aond] started. argc=" << argc << "\n" << flush;
+
+    try {
+        if (argc < 3) {
+            interactive_mode();
+            return 0;
+        }
+        return batch_mode(argv[1], argv[2]);
+    } catch (const exception& e) {
+        cerr << "Fatal error: " << e.what() << "\n";
+        return 1;
+    }
 }
