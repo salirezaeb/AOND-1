@@ -1,6 +1,4 @@
-
 #include <bits/stdc++.h>
-#include <unistd.h>
 using namespace std;
 
 struct Node {
@@ -32,59 +30,79 @@ struct RunningStats {
     long double stddev() const { return sqrt(var()); }
 };
 
+static inline string trim_copy(string s) {
+    auto issp = [](unsigned char c){ return std::isspace(c); };
+    while (!s.empty() && issp((unsigned char)s.back())) s.pop_back();
+    size_t i = 0;
+    while (i < s.size() && issp((unsigned char)s[i])) i++;
+    return s.substr(i);
+}
+
+static uint32_t parse_hex_u32(const string& s) {
+    string t = s;
+    if (t.size() >= 2 && (t[0]=='0') && (t[1]=='x' || t[1]=='X')) t = t.substr(2);
+    if (t.empty()) return 0;
+    return (uint32_t)stoul(t, nullptr, 16);
+}
+
+static string bits_of(uint32_t alignedPrefix, uint8_t length) {
+    if (length == 0) return "";
+    string out;
+    out.reserve(length);
+    for (int i = 0; i < (int)length; i++) {
+        uint32_t bit = (alignedPrefix >> (31 - i)) & 1u;
+        out.push_back(bit ? '1' : '0');
+    }
+    return out;
+}
+
+static string csv_escape(const string& s) {
+    bool need = false;
+    for (char c : s) if (c==',' || c=='"' || c=='\n' || c=='\r') { need = true; break; }
+    if (!need) return s;
+    string t = "\"";
+    for (char c : s) t += (c=='"') ? string("\"\"") : string(1, c);
+    t += "\"";
+    return t;
+}
+
 class MultiBitTrie {
 public:
     explicit MultiBitTrie(uint8_t s) : stride(s) {
-        if (!(stride==1 || stride==2 || stride==4 || stride==8)) throw runtime_error("invalid stride");
+        if (!(stride==1 || stride==2 || stride==4 || stride==8)) throw runtime_error("stride");
         nodes.emplace_back();
     }
 
-    void insert(uint32_t prefix, uint8_t length, uint32_t nextHop) {
-        if (length > 32) throw runtime_error("invalid length");
-        if (length == 0) {
-            nodes[0].hasHop = true;
-            nodes[0].hop = nextHop;
-            nodes[0].plen = 0;
-            return;
-        }
-
-        uint32_t masked = (length == 32) ? prefix : (prefix & (0xFFFFFFFFu << (32 - length)));
-        int cur = 0;
-        uint8_t pos = 0;
-
-        while (pos + stride <= length) {
-            uint16_t ch = chunk(masked, pos);
-            auto it = nodes[cur].child.find(ch);
-            if (it == nodes[cur].child.end()) {
-                int idx = (int)nodes.size();
-                nodes.emplace_back();
-                nodes[cur].child.emplace(ch, idx);
-                cur = idx;
-            } else {
-                cur = it->second;
-            }
-            pos += stride;
-        }
-
-        nodes[cur].hasHop = true;
-        nodes[cur].hop = nextHop;
-        nodes[cur].plen = length;
+    void clear() {
+        nodes.clear();
+        nodes.emplace_back();
+        rules.clear();
     }
 
-    optional<uint32_t> lookup(uint32_t ip) const {
+    void insert_prefix_bits(uint32_t prefixBitsRightAligned, uint8_t length, uint32_t nextHop) {
+        if (length > 32) throw runtime_error("length");
+        uint32_t aligned = 0;
+        if (length != 0) {
+            uint32_t mask = (length == 32) ? 0xFFFFFFFFu : ((1u << length) - 1u);
+            uint32_t v = prefixBitsRightAligned & mask;
+            aligned = (length == 32) ? v : (v << (32 - length));
+        }
+        insert_aligned(aligned, length, nextHop);
+    }
+
+    optional<uint32_t> lookup(uint32_t ipAligned32) const {
         int cur = 0;
         optional<pair<uint8_t, uint32_t>> best;
         if (nodes[0].hasHop) best = {nodes[0].plen, nodes[0].hop};
 
         uint8_t pos = 0;
         while (pos + stride <= 32) {
-            uint16_t ch = chunk(ip, pos);
+            uint16_t ch = chunk(ipAligned32, pos, stride);
             auto it = nodes[cur].child.find(ch);
             if (it == nodes[cur].child.end()) break;
             cur = it->second;
             if (nodes[cur].hasHop) {
-                if (!best.has_value() || nodes[cur].plen > best->first)
-                    best = {nodes[cur].plen, nodes[cur].hop};
+                if (!best.has_value() || nodes[cur].plen > best->first) best = {nodes[cur].plen, nodes[cur].hop};
             }
             pos += stride;
         }
@@ -107,84 +125,167 @@ public:
         return nodes.size() * approxNode + e * approxEdge;
     }
 
-    void tprint(ostream& os = cerr) const {
-        os << "(root)";
-        if (nodes[0].hasHop) os << " [len=" << (int)nodes[0].plen << ", nh=" << nodes[0].hop << "]";
-        os << "\n";
-        tprint_dfs(os, 0, 0);
-        os.flush();
+    void tprint_tree() const {
+        function<void(int,string)> dfs = [&](int u, string indent){
+            if (u == 0) {
+                cout << "(root)";
+                if (nodes[u].hasHop) cout << " [len=" << (int)nodes[u].plen << ", nh=" << nodes[u].hop << "]";
+                cout << "\n";
+            }
+            vector<pair<uint16_t,int>> kids;
+            kids.reserve(nodes[u].child.size());
+            for (auto &kv : nodes[u].child) kids.push_back({kv.first, kv.second});
+            sort(kids.begin(), kids.end(), [](auto &a, auto &b){ return a.first < b.first; });
+
+            for (auto &kv : kids) {
+                uint16_t lab = kv.first;
+                int v = kv.second;
+                string bits = bits_label(lab);
+                cout << indent << bits << " (" << lab << ")";
+                if (nodes[v].hasHop) cout << " [len=" << (int)nodes[v].plen << ", nh=" << nodes[v].hop << "]";
+                cout << "\n";
+                dfs(v, indent + "  ");
+            }
+        };
+        dfs(0, "");
+    }
+
+    void tprint_rules() const {
+        vector<Rule> r;
+        r.reserve(rules.size());
+        for (auto &kv : rules) r.push_back(kv.second);
+        sort(r.begin(), r.end(), [](const Rule& a, const Rule& b){
+            if (a.len != b.len) return a.len < b.len;
+            if (a.aligned != b.aligned) return a.aligned < b.aligned;
+            return a.hop < b.hop;
+        });
+
+        for (auto &x : r) {
+            string b = bits_of(x.aligned, x.len);
+            if (x.len == 0) cout << "*  " << x.hop << "\n";
+            else cout << b << "*  " << x.hop << "\n";
+        }
     }
 
 private:
+    struct Rule {
+        uint32_t aligned = 0;
+        uint8_t len = 0;
+        uint32_t hop = 0;
+    };
+
     vector<Node> nodes;
     uint8_t stride;
 
-    uint16_t chunk(uint32_t ip, uint8_t posFromMSB) const {
-        uint32_t shift = 32u - (uint32_t)posFromMSB - (uint32_t)stride;
-        return (uint16_t)((ip >> shift) & ((1u << stride) - 1u));
+    struct Key {
+        uint32_t aligned;
+        uint8_t len;
+        bool operator==(const Key& o) const { return aligned==o.aligned && len==o.len; }
+    };
+
+    struct KeyHash {
+        size_t operator()(const Key& k) const {
+            return std::hash<uint64_t>()(((uint64_t)k.aligned<<8) | (uint64_t)k.len);
+        }
+    };
+
+    unordered_map<Key, Rule, KeyHash> rules;
+
+    static uint16_t chunk(uint32_t ip, uint8_t posFromMSB, uint8_t strideBits) {
+        uint32_t shift = 32u - (uint32_t)posFromMSB - (uint32_t)strideBits;
+        return (uint16_t)((ip >> shift) & ((1u << strideBits) - 1u));
     }
 
-    string chunk_to_bin(uint16_t v) const {
-        string s(stride, '0');
-        for (int i = (int)stride - 1; i >= 0; --i) {
-            s[i] = (v & 1) ? '1' : '0';
-            v >>= 1;
+    string bits_label(uint16_t lab) const {
+        string s;
+        s.reserve(stride);
+        for (int i = stride-1; i >= 0; i--) {
+            s.push_back(((lab >> i) & 1) ? '1' : '0');
         }
         return s;
     }
 
-    void tprint_dfs(ostream& os, int nodeIdx, int depth) const {
-        vector<pair<uint16_t,int>> kids;
-        kids.reserve(nodes[nodeIdx].child.size());
-        for (auto &kv : nodes[nodeIdx].child) kids.push_back(kv);
-        sort(kids.begin(), kids.end(), [](auto &a, auto &b){ return a.first < b.first; });
+    int ensure_child(int cur, uint16_t lab) {
+        auto it = nodes[cur].child.find(lab);
+        if (it != nodes[cur].child.end()) return it->second;
+        int idx = (int)nodes.size();
+        nodes.emplace_back();
+        nodes[cur].child.emplace(lab, idx);
+        return idx;
+    }
 
-        for (auto &kv : kids) {
-            uint16_t lab = kv.first;
-            int childIdx = kv.second;
-            for (int i = 0; i < depth + 1; ++i) os << "  ";
-            os << chunk_to_bin(lab) << " (" << lab << ")";
-            if (nodes[childIdx].hasHop) {
-                os << " [len=" << (int)nodes[childIdx].plen << ", nh=" << nodes[childIdx].hop << "]";
-            }
-            os << "\n";
-            tprint_dfs(os, childIdx, depth + 1);
+    void mark_rule(uint32_t aligned, uint8_t len, uint32_t hop) {
+        Key k{aligned, len};
+        rules[k] = Rule{aligned, len, hop};
+    }
+
+    void insert_aligned(uint32_t aligned, uint8_t length, uint32_t nextHop) {
+        mark_rule(aligned, length, nextHop);
+
+        if (length == 0) {
+            nodes[0].hasHop = true;
+            nodes[0].hop = nextHop;
+            nodes[0].plen = 0;
+            return;
         }
+
+        function<void(int,uint8_t)> rec = [&](int cur, uint8_t pos){
+            uint8_t rem = (length >= pos) ? (length - pos) : 0;
+            if (rem == 0) {
+                nodes[cur].hasHop = true;
+                nodes[cur].hop = nextHop;
+                nodes[cur].plen = length;
+                return;
+            }
+
+            if (rem >= stride) {
+                uint16_t lab = chunk(aligned, pos, stride);
+                int nx = ensure_child(cur, lab);
+                rec(nx, pos + stride);
+                return;
+            }
+
+            uint8_t freeBits = stride - rem;
+            uint16_t seg = chunk(aligned, pos, stride);
+            uint16_t fixed = (uint16_t)(seg & (~((1u << freeBits) - 1u)));
+
+            for (uint16_t suf = 0; suf < (1u << freeBits); suf++) {
+                uint16_t lab = (uint16_t)(fixed | suf);
+                int nx = ensure_child(cur, lab);
+                nodes[nx].hasHop = true;
+                nodes[nx].hop = nextHop;
+                nodes[nx].plen = length;
+            }
+        };
+
+        rec(0, 0);
     }
 };
 
-static inline string trim_copy(string s) {
-    auto issp = [](unsigned char c){ return std::isspace(c); };
-    while (!s.empty() && issp((unsigned char)s.back())) s.pop_back();
-    size_t i = 0;
-    while (i < s.size() && issp((unsigned char)s[i])) i++;
-    return s.substr(i);
-}
-
-static uint32_t parse_hex_u32(const string& s) {
-    return (uint32_t)stoul(s, nullptr, 16);
-}
-
-struct PrefixLoadResult { size_t ok = 0; size_t skipped = 0; };
+struct PrefixLoadResult { size_t ok=0, skipped=0; };
 
 static PrefixLoadResult load_prefix_file_hex3(const string& path, MultiBitTrie &trie) {
     ifstream in(path);
     if (!in) throw runtime_error("open_prefix");
     PrefixLoadResult res;
     string line;
+
     while (getline(in, line)) {
         auto h = line.find('#');
         if (h != string::npos) line = line.substr(0, h);
         line = trim_copy(line);
         if (line.empty()) continue;
 
-        string a; int len; long long hop;
-        stringstream ss(line);
-        if (!(ss >> a >> len >> hop)) { res.skipped++; continue; }
+        string a;
+        int len, hop;
+        {
+            stringstream ss(line);
+            if (!(ss >> a >> len >> hop)) { res.skipped++; continue; }
+        }
         if (len < 0 || len > 32) { res.skipped++; continue; }
 
-        uint32_t prefix = parse_hex_u32(a);
-        trie.insert(prefix, (uint8_t)len, (uint32_t)hop);
+        uint32_t bits = parse_hex_u32(a);
+        trie.insert_prefix_bits(bits, (uint8_t)len, (uint32_t)hop);
         res.ok++;
     }
     return res;
@@ -202,27 +303,12 @@ static vector<string> load_addresses_hex_strings(const string& path) {
     return out;
 }
 
-static void write_csv_header(ofstream &out, const vector<string>& cols) {
-    for (size_t i = 0; i < cols.size(); i++) {
-        if (i) out << ",";
-        out << cols[i];
-    }
-    out << "\n";
+static int run_cmd(const string& cmd) {
+    int rc = system(cmd.c_str());
+    return rc;
 }
 
-static string csv_escape(const string& s) {
-    bool need = false;
-    for (char c : s) if (c==',' || c=='"' || c=='\n' || c=='\r') { need = true; break; }
-    if (!need) return s;
-    string t = "\"";
-    for (char c : s) t += (c=='"') ? string("\"\"") : string(1, c);
-    t += "\"";
-    return t;
-}
-
-static int run_cmd(const string& cmd) { return system(cmd.c_str()); }
-
-static void generate_plots_with_gnuplot() {
+static void write_gnuplot_files() {
     {
         ofstream gp("plot_time.gnuplot");
         gp <<
@@ -238,6 +324,7 @@ static void generate_plots_with_gnuplot() {
         "set boxwidth 0.7\n"
         "plot 'summary.csv' using 1:9 every ::1 title 'Avg(ns)' with boxes\n";
     }
+
     {
         ofstream gp("plot_memory.gnuplot");
         gp <<
@@ -253,101 +340,45 @@ static void generate_plots_with_gnuplot() {
         "set boxwidth 0.7\n"
         "plot 'summary.csv' using 1:11 every ::1 title 'Mem(bytes)' with boxes\n";
     }
+}
+
+static void run_gnuplot_if_available() {
+    write_gnuplot_files();
+    int rc = run_cmd("gnuplot --version > /dev/null 2>&1");
+    if (rc != 0) {
+        cerr << "[warn] gnuplot not found; plots skipped\n";
+        return;
+    }
     run_cmd("gnuplot plot_time.gnuplot");
     run_cmd("gnuplot plot_memory.gnuplot");
 }
 
-static void interactive_mode() {
-    cerr << "=== Interactive Mode ===\n" << flush;
-    cerr << "Stride? (1/2/4/8): " << flush;
-
-    int s;
-    if (!(cin >> s)) {
-        cerr << "\nInput error (cin failed).\n";
-        return;
+static void write_csv_header(ofstream &out, const vector<string>& cols) {
+    for (size_t i = 0; i < cols.size(); i++) {
+        if (i) out << ",";
+        out << cols[i];
     }
-    if (!(s==1 || s==2 || s==4 || s==8)) {
-        cerr << "Invalid stride.\n";
-        return;
-    }
-
-    MultiBitTrie trie((uint8_t)s);
-
-    while (true) {
-        cerr << "\n--- Menu ---\n"
-             << "1) Load prefixes from file\n"
-             << "2) Insert prefix (hexPrefix length nextHop)\n"
-             << "3) Lookup address (hexAddress)\n"
-             << "4) tprint\n"
-             << "5) Memory estimate\n"
-             << "0) Exit\n"
-             << "> " << flush;
-
-        int cmd;
-        if (!(cin >> cmd)) {
-            cerr << "\nEOF/invalid input. Exiting.\n";
-            return;
-        }
-        if (cmd == 0) return;
-
-        if (cmd == 1) {
-            string path;
-            cerr << "prefix-file path: " << flush;
-            cin >> path;
-            try {
-                auto lr = load_prefix_file_hex3(path, trie);
-                cerr << "Loaded: " << lr.ok << " (skipped: " << lr.skipped << ")\n";
-            } catch (const exception& e) {
-                cerr << "Error: " << e.what() << "\n";
-            }
-        } else if (cmd == 2) {
-            string hx; int len; long long hop;
-            cerr << "Enter: hexPrefix length nextHop : " << flush;
-            cin >> hx >> len >> hop;
-            try {
-                trie.insert(parse_hex_u32(hx), (uint8_t)len, (uint32_t)hop);
-                cerr << "OK\n";
-            } catch (const exception& e) {
-                cerr << "Insert failed: " << e.what() << "\n";
-            }
-        } else if (cmd == 3) {
-            string hx;
-            cerr << "hexAddress: " << flush;
-            cin >> hx;
-            try {
-                uint32_t ip = parse_hex_u32(hx);
-                auto t1 = chrono::high_resolution_clock::now();
-                auto nh = trie.lookup(ip);
-                auto t2 = chrono::high_resolution_clock::now();
-                long double ns = chrono::duration<long double, nano>(t2 - t1).count();
-                cerr << "Next hop: " << (nh ? to_string(*nh) : string("None"))
-                     << " | time(ns): " << (double)ns << "\n";
-            } catch (const exception& e) {
-                cerr << "Lookup failed: " << e.what() << "\n";
-            }
-        } else if (cmd == 4) {
-            trie.tprint(cerr);
-        } else if (cmd == 5) {
-            cerr << "node_count=" << trie.nodeCount()
-                 << " edge_count=" << trie.edgeCount()
-                 << " est_memory_bytes=" << trie.estimateMemoryBytes()
-                 << "\n";
-        } else {
-            cerr << "Unknown command.\n";
-        }
-    }
+    out << "\n";
 }
 
-static int batch_mode(const string& prefixFile, const string& addrFile) {
-    vector<string> addrHex = load_addresses_hex_strings(addrFile);
+static int bench_mode(const string& prefixFile, const string& addrFile) {
+    vector<string> addrHex;
+    try {
+        addrHex = load_addresses_hex_strings(addrFile);
+    } catch (...) {
+        cerr << "Error reading addresses file\n";
+        return 2;
+    }
 
     ofstream outRes("lookup_results.csv");
     ofstream outSum("summary.csv");
-    if (!outRes || !outSum) throw runtime_error("cannot create csv");
+    if (!outRes || !outSum) {
+        cerr << "Error creating CSV files\n";
+        return 3;
+    }
 
     write_csv_header(outRes, {"stride","address_hex","next_hop","time_ns"});
-    write_csv_header(outSum, {"stride","prefix_count","node_count","edge_count","build_time_ms",
-                              "lookup_count","min_ns","max_ns","avg_ns","std_ns","est_memory_bytes"});
+    write_csv_header(outSum, {"stride","prefix_count","node_count","edge_count","build_time_ms","lookup_count","min_ns","max_ns","avg_ns","std_ns","est_memory_bytes"});
 
     vector<int> strides = {1,2,4,8};
 
@@ -355,14 +386,25 @@ static int batch_mode(const string& prefixFile, const string& addrFile) {
         MultiBitTrie trie((uint8_t)s);
 
         auto b1 = chrono::high_resolution_clock::now();
-        auto lr = load_prefix_file_hex3(prefixFile, trie);
+        PrefixLoadResult lr;
+        try {
+            lr = load_prefix_file_hex3(prefixFile, trie);
+        } catch (...) {
+            cerr << "Error reading prefix file\n";
+            return 4;
+        }
         auto b2 = chrono::high_resolution_clock::now();
         long double build_ms = chrono::duration<long double, milli>(b2 - b1).count();
 
         RunningStats st;
 
         for (const string& hx : addrHex) {
-            uint32_t ip = parse_hex_u32(hx);
+            uint32_t ip;
+            try {
+                ip = parse_hex_u32(hx);
+            } catch (...) {
+                continue;
+            }
 
             auto t1 = chrono::high_resolution_clock::now();
             auto hop = trie.lookup(ip);
@@ -390,24 +432,106 @@ static int batch_mode(const string& prefixFile, const string& addrFile) {
                << trie.estimateMemoryBytes() << "\n";
     }
 
+    outRes.flush();
+    outSum.flush();
     outRes.close();
     outSum.close();
-    generate_plots_with_gnuplot();
+
+    run_gnuplot_if_available();
+    cerr << "Wrote: lookup_results.csv, summary.csv\n";
+    cerr << "Plots: plot_time.png, plot_memory.png (if gnuplot installed)\n";
     return 0;
 }
 
-int main(int argc, char** argv) {
-    // پیام شروع را روی stderr چاپ می‌کنیم تا همیشه دیده شود
-    cerr << "[aond] started. argc=" << argc << "\n" << flush;
+static uint32_t parse_ip_hex32(const string& hx) {
+    return parse_hex_u32(hx);
+}
 
-    try {
-        if (argc < 3) {
-            interactive_mode();
-            return 0;
-        }
-        return batch_mode(argv[1], argv[2]);
-    } catch (const exception& e) {
-        cerr << "Fatal error: " << e.what() << "\n";
+int main(int argc, char** argv) {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+
+    if (argc == 3) {
+        return bench_mode(argv[1], argv[2]);
+    }
+
+    cerr << "[aond] started. argc=" << argc << "\n";
+    cerr << "=== Interactive Mode ===\n";
+
+    int s;
+    cerr << "Stride? (1/2/4/8): ";
+    if (!(cin >> s)) return 0;
+    if (!(s==1 || s==2 || s==4 || s==8)) {
+        cerr << "Invalid stride\n";
         return 1;
     }
+
+    MultiBitTrie trie((uint8_t)s);
+
+    while (true) {
+        cerr << "\n--- Menu ---\n";
+        cerr << "1) Load prefixes from file\n";
+        cerr << "2) Insert prefix (hexPrefix length nextHop)\n";
+        cerr << "3) Lookup address (hexAddress)\n";
+        cerr << "4) tprint (tree)\n";
+        cerr << "5) Memory estimate\n";
+        cerr << "6) tprint (rules)\n";
+        cerr << "0) Exit\n";
+        cerr << "> ";
+
+        int cmd;
+        if (!(cin >> cmd)) break;
+
+        if (cmd == 0) break;
+
+        if (cmd == 1) {
+            string path;
+            cerr << "prefix-file path: ";
+            cin >> path;
+            try {
+                auto r = load_prefix_file_hex3(path, trie);
+                cerr << "Loaded: " << r.ok << " (skipped: " << r.skipped << ")\n";
+            } catch (...) {
+                cerr << "Error reading prefix file\n";
+            }
+        } else if (cmd == 2) {
+            string hx;
+            int len, hop;
+            cerr << "Enter: hexPrefix length nextHop : ";
+            cin >> hx >> len >> hop;
+            try {
+                trie.insert_prefix_bits(parse_hex_u32(hx), (uint8_t)len, (uint32_t)hop);
+                cerr << "OK\n";
+            } catch (...) {
+                cerr << "Error\n";
+            }
+        } else if (cmd == 3) {
+            string hx;
+            cerr << "hexAddress: ";
+            cin >> hx;
+            uint32_t ip = 0;
+            try { ip = parse_ip_hex32(hx); }
+            catch (...) { cerr << "Bad hex\n"; continue; }
+
+            auto t1 = chrono::high_resolution_clock::now();
+            auto hop = trie.lookup(ip);
+            auto t2 = chrono::high_resolution_clock::now();
+            long double ns = chrono::duration<long double, nano>(t2 - t1).count();
+
+            if (hop.has_value()) cerr << "Next hop: " << *hop << " | time(ns): " << (double)ns << "\n";
+            else cerr << "Next hop: None | time(ns): " << (double)ns << "\n";
+        } else if (cmd == 4) {
+            trie.tprint_tree();
+        } else if (cmd == 5) {
+            cerr << "node_count=" << trie.nodeCount()
+                 << " edge_count=" << trie.edgeCount()
+                 << " est_memory_bytes=" << trie.estimateMemoryBytes() << "\n";
+        } else if (cmd == 6) {
+            trie.tprint_rules();
+        } else {
+            cerr << "Unknown\n";
+        }
+    }
+
+    return 0;
 }
